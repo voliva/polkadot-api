@@ -1,4 +1,4 @@
-import { walk } from "estree-walker"
+import { SyncHandler, walk } from "estree-walker"
 
 import type {
   Node,
@@ -9,6 +9,7 @@ import type {
   CallExpression,
   Expression,
   ExportDefaultDeclaration,
+  AssignmentExpression,
 } from "estree"
 
 export type ImportedSymbol =
@@ -28,7 +29,6 @@ export interface Hooks<T> {
     index: number,
     imported: ImportedSymbol,
     file: string,
-    name: string,
   ) => T | null | void
   memberAccess?: (symbol: T, property: string) => T | null | void
   functionCall?: (symbol: T, args: Array<T | null>) => T | null | void
@@ -66,12 +66,7 @@ export function astSymbolTracker<T>(rootAst: Node, hooks: Hooks<T>) {
             return { type: "named", name: specifier.imported.name }
         }
       })()
-      const metadata = hooks.importSymbol?.(
-        importIndex,
-        importedSymbol,
-        file,
-        name,
-      )
+      const metadata = hooks.importSymbol?.(importIndex, importedSymbol, file)
       if (metadata) {
         scope.set(name, metadata)
       }
@@ -87,6 +82,9 @@ export function astSymbolTracker<T>(rootAst: Node, hooks: Hooks<T>) {
       case "CallExpression":
         return readCallExpression(expression)
     }
+    // TODO other expressions that could be actually become tracked
+    // e.g. const result = (() => { this.wont.be.currently.tracked })()
+    walk(expression, rootWalker)
     return null
   }
   const readMemberExpression = (root: MemberExpression): T | null => {
@@ -118,10 +116,10 @@ export function astSymbolTracker<T>(rootAst: Node, hooks: Hooks<T>) {
     return Object.fromEntries(
       root.declarations
         .map((declarator) => {
-          if (declarator.id.type !== "Identifier") return null! // TODO
           const value = declarator.init
             ? resolveExpression(declarator.init)
             : null
+          if (declarator.id.type !== "Identifier") return null! // TODO pattern assignment
           scope.set(declarator.id.name, value)
           return [declarator.id.name, value]
         })
@@ -160,8 +158,16 @@ export function astSymbolTracker<T>(rootAst: Node, hooks: Hooks<T>) {
       hooks.exportSymbol?.(symbol, { type: "default" })
     }
   }
+  const readAssignmentExpression = (root: AssignmentExpression) => {
+    const right = resolveExpression(root.right)
+    if (root.left.type !== "Identifier") return null! // TODO pattern assignment
+    scope.set(root.left.name, right)
+  }
 
-  walk(rootAst, {
+  const rootWalker: {
+    enter: SyncHandler
+    leave: SyncHandler
+  } = {
     enter(node) {
       switch (node.type) {
         case "ImportDeclaration":
@@ -180,6 +186,10 @@ export function astSymbolTracker<T>(rootAst: Node, hooks: Hooks<T>) {
           readVariableDeclaration(node)
           this.skip()
           break
+        case "AssignmentExpression":
+          readAssignmentExpression(node)
+          this.skip()
+          break
         case "ExportNamedDeclaration":
           readExportNamedDeclaration(node)
           this.skip()
@@ -188,11 +198,20 @@ export function astSymbolTracker<T>(rootAst: Node, hooks: Hooks<T>) {
           readExportDefaultDeclaration(node)
           this.skip()
           break
+        case "BlockStatement":
+          scope.push()
         // default:
         //   console.log(node);
       }
     },
-  })
+    leave(node) {
+      if (node.type === "BlockStatement") {
+        scope.pop()
+      }
+    },
+  }
+
+  walk(rootAst, rootWalker)
 }
 
 class Scope<T> {

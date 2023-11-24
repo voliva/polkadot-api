@@ -33,14 +33,17 @@
   "types": "./dist/index.d.ts",
   "scripts": {
     "prebuild": "rimraf -rf dist/*",
-    "build": "rollup -c"
+    "build": "rollup -c",
+    "test": "vitest"
   },
   "devDependencies": {
     "@types/estree": "1.0.1",
+    "@typescript-eslint/typescript-estree": "^6.12.0",
     "rollup": "3.29.4",
     "rollup-plugin-typescript2": "^0.36.0",
     "tslib": "^2.6.2",
-    "typescript": "^5.1.6"
+    "typescript": "^5.1.6",
+    "vitest": "^0.34.6"
   },
   "dependencies": {
     "estree-walker": "^3.0.3"
