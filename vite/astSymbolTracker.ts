@@ -8,6 +8,7 @@ import type {
   MemberExpression,
   CallExpression,
   Expression,
+  ExportDefaultDeclaration,
 } from "estree"
 
 export type ImportedSymbol =
@@ -24,8 +25,9 @@ export type ExportedSymbol =
 
 export interface Hooks<T> {
   importSymbol?: (
-    file: string,
+    index: number,
     imported: ImportedSymbol,
+    file: string,
     name: string,
   ) => T | null | void
   memberAccess?: (symbol: T, property: string) => T | null | void
@@ -49,6 +51,7 @@ export interface Hooks<T> {
 export function astSymbolTracker<T>(rootAst: Node, hooks: Hooks<T>) {
   const scope = new Scope<T>()
 
+  let importIndex = 0
   const readImportDeclaration = (root: ImportDeclaration) => {
     const file = String(root.source.value)
     root.specifiers.forEach((specifier) => {
@@ -63,11 +66,17 @@ export function astSymbolTracker<T>(rootAst: Node, hooks: Hooks<T>) {
             return { type: "named", name: specifier.imported.name }
         }
       })()
-      const metadata = hooks.importSymbol?.(file, importedSymbol, name)
+      const metadata = hooks.importSymbol?.(
+        importIndex,
+        importedSymbol,
+        file,
+        name,
+      )
       if (metadata) {
         scope.set(name, metadata)
       }
     })
+    importIndex++
   }
   const resolveExpression = (expression: Expression | Node) => {
     switch (expression.type) {
@@ -103,12 +112,53 @@ export function astSymbolTracker<T>(rootAst: Node, hooks: Hooks<T>) {
 
     return hooks.functionCall?.(callee, fnArgs) ?? null
   }
-  const readVariableDeclaration = (root: VariableDeclaration) => {
-    root.declarations.forEach((declarator) => {
-      if (declarator.id.type !== "Identifier") return // TODO
-      const value = declarator.init ? resolveExpression(declarator.init) : null
-      scope.set(declarator.id.name, value)
+  const readVariableDeclaration = (
+    root: VariableDeclaration,
+  ): Record<string, T | null> => {
+    return Object.fromEntries(
+      root.declarations
+        .map((declarator) => {
+          if (declarator.id.type !== "Identifier") return null! // TODO
+          const value = declarator.init
+            ? resolveExpression(declarator.init)
+            : null
+          scope.set(declarator.id.name, value)
+          return [declarator.id.name, value]
+        })
+        .filter(Boolean),
+    )
+  }
+  const readExportNamedDeclaration = (root: ExportNamedDeclaration) => {
+    if (root.declaration) {
+      // Declaration can be variable, function or class. We only care about variables
+      if (root.declaration.type !== "VariableDeclaration") return
+
+      const variables = readVariableDeclaration(root.declaration)
+      Object.entries(variables).forEach(([name, symbol]) => {
+        if (!symbol) return
+        hooks.exportSymbol?.(symbol, { type: "named", name })
+      })
+    }
+    root.specifiers.forEach((specifier) => {
+      const symbol = scope.get(specifier.local.name)
+      if (symbol) {
+        hooks.exportSymbol?.(symbol, {
+          type: "named",
+          name: specifier.exported.name,
+        })
+      }
     })
+  }
+  const readExportDefaultDeclaration = (root: ExportDefaultDeclaration) => {
+    if (
+      root.declaration.type === "ClassDeclaration" ||
+      root.declaration.type === "FunctionDeclaration"
+    )
+      return
+    const symbol = resolveExpression(root.declaration)
+    if (symbol) {
+      hooks.exportSymbol?.(symbol, { type: "default" })
+    }
   }
 
   walk(rootAst, {
@@ -130,6 +180,16 @@ export function astSymbolTracker<T>(rootAst: Node, hooks: Hooks<T>) {
           readVariableDeclaration(node)
           this.skip()
           break
+        case "ExportNamedDeclaration":
+          readExportNamedDeclaration(node)
+          this.skip()
+          break
+        case "ExportDefaultDeclaration":
+          readExportDefaultDeclaration(node)
+          this.skip()
+          break
+        // default:
+        //   console.log(node);
       }
     },
   })
