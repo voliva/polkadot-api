@@ -9,7 +9,11 @@ const options = {
     { file: pkg.module, format: "es" },
   ],
   plugins: [typescript()],
-  external: Object.keys({ ...pkg.dependencies, ...pkg.peerDependencies }),
+  external: [
+    ...Object.keys({ ...pkg.dependencies, ...pkg.peerDependencies }),
+    "fs",
+    "path",
+  ],
 }
 
 export default options

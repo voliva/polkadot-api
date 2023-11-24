@@ -1,18 +1,49 @@
+import escodegen from "escodegen"
 import type { Node } from "estree"
-import { ModuleInfo, Plugin, PluginContext } from "rollup"
+import fs from "fs"
+import path from "path"
+import type { ModuleInfo, Plugin, PluginContext } from "rollup"
 import { astSymbolTracker } from "./astSymbolTracker"
+import { applyWhitelist } from "./whitelist"
 
 const DEFAULT = Symbol("default")
 type DEFAULT = typeof DEFAULT
 
-export default function descriptorTreeShake(): Plugin {
+export default function descriptorTreeShake(codegenFolder: string): Plugin {
+  let codegenFiles: string[] = []
+  let papiClient: string = ""
+
   const entryPoints: string[] = []
+  let detectedPaths: Paths = {}
 
   return {
-    name: "pApiTreeShaker",
+    name: "descriptorTreeShake",
+    async buildStart() {
+      const files = await new Promise<string[]>((resolve, reject) => {
+        fs.readdir(codegenFolder, (err, files) => {
+          if (err) return reject(err)
+          resolve(
+            files
+              .filter((file) => !file.endsWith(".d.ts") && file.endsWith(".ts"))
+              .map((name) => path.join(codegenFolder, name)),
+          )
+        })
+      })
+      const resolved = await Promise.all(
+        files.map((file) => this.resolve(file)),
+      )
+      codegenFiles = resolved.filter(Boolean).map((result) => result!.id)
+
+      const papiClientResolution = await this.resolve("@polkadot-api/client")
+      if (!papiClientResolution) {
+        throw new Error("Can't find module @polkadot-api/client")
+      }
+      papiClient = papiClientResolution.id
+    },
     moduleParsed(moduleInfo: ModuleInfo) {
       if (
-        moduleInfo.importedIds.some((id) => id.includes("/packages/client/"))
+        codegenFiles.some((id) => moduleInfo.importedIds.includes(id)) ||
+        moduleInfo.importedIds.includes(papiClient)
       ) {
         entryPoints.push(moduleInfo.id)
       }
@@ -37,13 +68,21 @@ export default function descriptorTreeShake(): Plugin {
           }
 
       const resolvedExports: Record<string, Exports> = {}
-      const traverse = (id: string): Record<string, Set<string>> => {
+      const traverse = (
+        id: string,
+      ): {
+        paths: Paths
+        importers: readonly string[]
+      } => {
         const root = this.getModuleInfo(id)
         if (!root) {
           throw new Error(`Module "${id}" not found`)
         }
         if (!root.ast) {
-          return {}
+          return {
+            paths: {},
+            importers: [],
+          }
         }
 
         // const visited = new Set<string>();
@@ -51,12 +90,12 @@ export default function descriptorTreeShake(): Plugin {
           root.ast as Node,
           root.importedIdResolutions.map(
             (resolution): ImportMetadata | null => {
-              if (resolution.id.includes("/packages/client/")) {
+              if (resolution.id === papiClient) {
                 return {
                   type: "client",
                 }
               }
-              if (resolution.id.includes("codegen/test.ts")) {
+              if (codegenFiles.some((id) => id === resolution.id)) {
                 return {
                   type: "generated",
                   file: resolution.id,
@@ -73,28 +112,22 @@ export default function descriptorTreeShake(): Plugin {
           ),
         )
 
-        if (Object.keys(result.exports).length) {
-          resolvedExports[id] = {
-            ...(resolvedExports[id] ?? {}),
-            ...result.exports,
-          }
-          root.importers.map(traverse).forEach((paths) => {
-            Object.entries(paths).forEach(([id, pathSet]) => {
-              result.paths[id] = result.paths[id]
-                ? new Set([...result.paths[id], ...pathSet])
-                : pathSet
-            })
-          })
+        resolvedExports[id] = {
+          ...(resolvedExports[id] ?? {}),
+          ...result.exports,
         }
 
-        return result.paths
+        return {
+          paths: result.paths,
+          importers: Object.keys(result.exports).length ? root.importers : [],
+        }
       }
 
       const readAst = (
         rootAst: Node,
         importMetadata: Array<ImportMetadata | null>,
       ) => {
-        const paths: Record<string, Set<string>> = {}
+        const paths: Paths = {}
         const exports: Exports = {}
         astSymbolTracker<SymbolMetadata>(rootAst, {
           importSymbol(index, imported) {
@@ -179,10 +212,57 @@ export default function descriptorTreeShake(): Plugin {
         return { paths, exports }
       }
 
-      entryPoints.forEach((id) => {
+      const filesToTraverse = new Set(entryPoints)
+      const paths: Paths[] = []
+      while (filesToTraverse.size) {
+        const id = shiftSet(filesToTraverse)!
         const result = traverse(id)
-        console.log(id, result)
+        paths.push(result.paths)
+        result.importers.forEach((id) => filesToTraverse.add(id))
+      }
+      detectedPaths = mergePaths(paths)
+    },
+    renderChunk(code, chunk) {
+      Object.entries(detectedPaths).forEach(([id, whitelist]) => {
+        const targetModule = chunk.modules[id]
+        if (targetModule?.code) {
+          const ast = this.parse(targetModule.code)
+          applyWhitelist(ast as Node, whitelist)
+
+          const newCode = escodegen.generate(ast)
+
+          const idx = code.indexOf(targetModule.code)
+          if (idx < 0) throw new Error("Module code can't be found in source")
+          code = [
+            code.slice(0, idx),
+            newCode,
+            code.slice(idx + targetModule.renderedLength),
+          ].join("")
+          // TODO chunk is mutable and changes applied in this hook will propagate to other plugins and to the generated bundle. That means if you add or remove imports or exports in this hook, you should update imports, importedBindings and/or exports.
+        }
       })
+
+      return {
+        code,
+      }
     },
   }
+}
+
+type Paths = Record<string, Set<string>>
+function mergePaths(paths: Array<Paths>) {
+  return paths.reduce((acc, paths) => {
+    Object.entries(paths).forEach(([id, pathSet]) => {
+      acc[id] = acc[id] ? new Set([...acc[id], ...pathSet]) : pathSet
+    })
+    return acc
+  }, {} as Paths)
+}
+
+function shiftSet<T>(set: Set<T>) {
+  for (const value of set) {
+    set.delete(value)
+    return value
+  }
+  return
 }

@@ -3,6 +3,7 @@
   "include": ["src"],
   "exclude": ["**/*.spec.ts"],
   "compilerOptions": {
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "types": ["node"]
   }
 }
