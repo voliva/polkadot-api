@@ -1,6 +1,14 @@
 import { walk } from "estree-walker"
 
-import type { ImportDeclaration, MemberExpression, Node } from "estree"
+import type {
+  Node,
+  ImportDeclaration,
+  ExportNamedDeclaration,
+  VariableDeclaration,
+  MemberExpression,
+  CallExpression,
+  Expression,
+} from "estree"
 
 export type ImportedSymbol =
   | {
@@ -20,10 +28,23 @@ export interface Hooks<T> {
     imported: ImportedSymbol,
     name: string,
   ) => T | null | void
-  memberAccess?: (symbol: T, path: string[]) => T | null | void
+  memberAccess?: (symbol: T, property: string) => T | null | void
   functionCall?: (symbol: T, args: Array<T | null>) => T | null | void
   exportSymbol?: (symbol: T, exported: ExportedSymbol) => void
 }
+
+/**
+ * AST symbolTracker
+ *
+ * -> Given a list of symbols defined in the root scope, lets you track their usage.
+ * -> Features
+ *  -> Member access: client.qt.Pallet1.baz.methodA() => client.qt.Pallet1.baz.methodA
+ *  -> Function calls: client.qt.Pallet1.baz.methodA(), createClient(descriptor)
+ *  -> Notify when creating a new variable, lets you keep tracking it: const client = createClient(descriptor);
+ *  -> Notify on import, lets you track it.
+ *  -> Notify on dynamic import, lets you track it.
+ *  -> Which ones are exported
+ */
 
 export function astSymbolTracker<T>(rootAst: Node, hooks: Hooks<T>) {
   const scope = new Scope<T>()
@@ -48,27 +69,46 @@ export function astSymbolTracker<T>(rootAst: Node, hooks: Hooks<T>) {
       }
     })
   }
-  const readMemberExpression = (
-    root: MemberExpression,
-  ): { symbol: T; path: string[] } | null => {
-    const property = root.property
-    // property can also be an expression, such as in (1 + 2).foo
-    // TODO function().foo if function() is tracked
-    if (property.type !== "Identifier") return null
-
-    switch (root.object.type) {
+  const resolveExpression = (expression: Expression | Node) => {
+    switch (expression.type) {
       case "MemberExpression":
-        const resolved = readMemberExpression(root.object)
-        if (!resolved) return null
-        return {
-          symbol: resolved.symbol,
-          path: [...resolved.path, property.name],
-        }
+        return readMemberExpression(expression)
       case "Identifier":
-        const fromScope = scope.get(root.object.name)
-        return fromScope ? { symbol: fromScope, path: [property.name] } : null
+        return scope.get(expression.name)
+      case "CallExpression":
+        return readCallExpression(expression)
     }
     return null
+  }
+  const readMemberExpression = (root: MemberExpression): T | null => {
+    const property = root.property
+    // property can also be an expression, such as in foo[1+2] foo["bar"] foo[something ? "bar" : "baz"]
+    // In that case we can't track it
+    // TODO bail out from tree shaking
+    // TODO give opportunity to keep tracking with metadata
+    if (property.type !== "Identifier") return null
+
+    const symbol = resolveExpression(root.object)
+    if (!symbol) return null
+
+    return hooks.memberAccess?.(symbol, property.name) ?? null
+  }
+  const readCallExpression = (root: CallExpression): T | null => {
+    const callee = resolveExpression(root.callee)
+    if (!callee) return null
+
+    const fnArgs = root.arguments.map((expression) =>
+      resolveExpression(expression),
+    )
+
+    return hooks.functionCall?.(callee, fnArgs) ?? null
+  }
+  const readVariableDeclaration = (root: VariableDeclaration) => {
+    root.declarations.forEach((declarator) => {
+      if (declarator.id.type !== "Identifier") return // TODO
+      const value = declarator.init ? resolveExpression(declarator.init) : null
+      scope.set(declarator.id.name, value)
+    })
   }
 
   walk(rootAst, {
@@ -79,13 +119,16 @@ export function astSymbolTracker<T>(rootAst: Node, hooks: Hooks<T>) {
           this.skip()
           break
         case "MemberExpression":
-          {
-            const tracked = readMemberExpression(node)
-            if (tracked) {
-              hooks.memberAccess?.(tracked.symbol, tracked.path)
-            }
-            this.skip()
-          }
+          readMemberExpression(node)
+          this.skip()
+          break
+        case "CallExpression":
+          readCallExpression(node)
+          this.skip()
+          break
+        case "VariableDeclaration":
+          readVariableDeclaration(node)
+          this.skip()
           break
       }
     },
@@ -93,7 +136,7 @@ export function astSymbolTracker<T>(rootAst: Node, hooks: Hooks<T>) {
 }
 
 class Scope<T> {
-  private stack: Array<Record<string, T>> = [{}]
+  private stack: Array<Record<string, T | null>> = [{}]
 
   push() {
     this.stack.push({})
@@ -101,7 +144,7 @@ class Scope<T> {
   pop() {
     this.stack.pop()
   }
-  set(name: string, value: T) {
+  set(name: string, value: T | null) {
     this.stack[this.stack.length - 1][name] = value
   }
   get(name: string) {
@@ -112,7 +155,7 @@ class Scope<T> {
     }
     return null
   }
-  replace(name: string, value: T) {
+  replace(name: string, value: T | null) {
     for (let i = this.stack.length - 1; i > 0; i--) {
       if (name in this.stack[i]) {
         this.stack[i][name] = value

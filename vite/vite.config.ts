@@ -66,7 +66,7 @@ function pApiTreeShaker(): Plugin {
         type SymbolMetadata =
           | { type: "clientNamespace" | "createClientSymbol" }
           | { type: "generatedSymbol" | "clientSymbol"; file: string }
-          | { type: "path"; file: string; path: string }
+          | { type: "path"; file: string; path: string[] }
 
         astSymbolTracker<SymbolMetadata>(rootAst, {
           importSymbol(file, imported) {
@@ -92,8 +92,29 @@ function pApiTreeShaker(): Plugin {
               }
             }
           },
-          memberAccess(symbol, path) {
-            console.log(symbol, path)
+          memberAccess(symbol, property) {
+            console.log(symbol, property)
+            switch (symbol.type) {
+              case "clientNamespace":
+                return property === "createClient"
+                  ? { type: "createClientSymbol" }
+                  : null
+              case "clientSymbol":
+                return { type: "path", file: symbol.file, path: [property] }
+              case "path":
+                return { ...symbol, path: [...symbol.path, property] }
+            }
+          },
+          functionCall(symbol, args) {
+            if (symbol.type !== "createClientSymbol") return null
+            const arg = args[1]
+            if (!arg || arg.type !== "generatedSymbol") {
+              throw new Error("Can't know which generated code it's using")
+            }
+            return {
+              type: "clientSymbol",
+              file: arg.file,
+            }
           },
         })
       }
