@@ -139,7 +139,7 @@ describe("astSymbolTracker", () => {
     )
   })
 
-  it("Tracks within complex expressions", () => {
+  it("tracks within complex expressions", () => {
     testTrackerFromCode(
       `
       import { tracked } from 'moduleA';
@@ -157,7 +157,7 @@ describe("astSymbolTracker", () => {
     )
   })
 
-  it("Tracks when the code is in reverse order", () => {
+  it("tracks when the code is in reverse order", () => {
     testTrackerFromCode(
       `
       import { tracked } from 'moduleA';
@@ -178,6 +178,27 @@ describe("astSymbolTracker", () => {
           ["something", "subproperty"],
         ],
         functionCall: [["something", []]],
+      },
+    )
+  })
+
+  it("can handle simple destructuring", () => {
+    testTrackerFromCode(
+      `
+      import { tracked } from 'moduleA';
+
+      const { memberA: renamed, ...rest } = tracked;
+      const { notHappening } = { notHappening: tracked };
+      const [ first ] = renamed;
+      `,
+      {
+        importSymbol: [
+          [0, { type: "named", name: "tracked" }, "moduleA", "imported"],
+        ],
+        memberAccess: [
+          ["imported", "memberA", "renamed"],
+          ["renamed", "0"],
+        ],
       },
     )
   })

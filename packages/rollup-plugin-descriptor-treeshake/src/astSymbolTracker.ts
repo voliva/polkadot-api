@@ -119,7 +119,41 @@ export function astSymbolTracker<T>(rootAst: Node, hooks: Hooks<T>) {
           const value = declarator.init
             ? resolveExpression(declarator.init)
             : null
-          if (declarator.id.type !== "Identifier") return null! // TODO pattern assignment
+          // Going for simple case of `const { property } = tracked`
+          // TODO nested access `const { property: { subproperty }} = tracked`;
+          if (declarator.id.type === "ObjectPattern") {
+            return declarator.id.properties.map((property) => {
+              if (
+                property.type === "Property" &&
+                property.key.type === "Identifier" &&
+                property.value.type === "Identifier"
+              ) {
+                if (value) {
+                  const tracked =
+                    hooks.memberAccess?.(value, property.key.name) ?? null
+                  scope.set(property.value.name, tracked)
+                  return [property.value.name, tracked]
+                }
+                scope.set(property.value.name, null)
+              }
+              return null
+            })
+          }
+          if (declarator.id.type === "ArrayPattern") {
+            return declarator.id.elements.map((element, idx) => {
+              if (element?.type === "Identifier") {
+                if (value) {
+                  const tracked =
+                    hooks.memberAccess?.(value, String(idx)) ?? null
+                  scope.set(element.name, tracked)
+                }
+                scope.set(element.name, null)
+              }
+              return null
+            })
+          }
+          // TODO other pattern assignment
+          if (declarator.id.type !== "Identifier") return null!
           scope.set(declarator.id.name, value)
           return [declarator.id.name, value]
         })
