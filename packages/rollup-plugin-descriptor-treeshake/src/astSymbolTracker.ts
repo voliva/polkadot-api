@@ -1,15 +1,15 @@
-import { SyncHandler, walk } from "estree-walker"
+import { walk } from "estree-walker"
 
 import type {
-  Node,
-  ImportDeclaration,
-  ExportNamedDeclaration,
-  VariableDeclaration,
-  MemberExpression,
-  CallExpression,
-  Expression,
-  ExportDefaultDeclaration,
   AssignmentExpression,
+  CallExpression,
+  ExportDefaultDeclaration,
+  ExportNamedDeclaration,
+  Expression,
+  ImportDeclaration,
+  MemberExpression,
+  Node,
+  VariableDeclaration,
 } from "estree"
 
 export type ImportedSymbol =
@@ -84,7 +84,7 @@ export function astSymbolTracker<T>(rootAst: Node, hooks: Hooks<T>) {
     }
     // TODO other expressions that could be actually become tracked
     // e.g. const result = (() => { this.wont.be.currently.tracked })()
-    walk(expression, rootWalker)
+    walkRoot(expression)
     return null
   }
   const readMemberExpression = (root: MemberExpression): T | null => {
@@ -164,54 +164,67 @@ export function astSymbolTracker<T>(rootAst: Node, hooks: Hooks<T>) {
     scope.set(root.left.name, right)
   }
 
-  const rootWalker: {
-    enter: SyncHandler
-    leave: SyncHandler
-  } = {
-    enter(node) {
-      switch (node.type) {
-        case "ImportDeclaration":
-          readImportDeclaration(node)
-          this.skip()
-          break
-        case "MemberExpression":
-          readMemberExpression(node)
-          this.skip()
-          break
-        case "CallExpression":
-          readCallExpression(node)
-          this.skip()
-          break
-        case "VariableDeclaration":
-          readVariableDeclaration(node)
-          this.skip()
-          break
-        case "AssignmentExpression":
-          readAssignmentExpression(node)
-          this.skip()
-          break
-        case "ExportNamedDeclaration":
-          readExportNamedDeclaration(node)
-          this.skip()
-          break
-        case "ExportDefaultDeclaration":
-          readExportDefaultDeclaration(node)
-          this.skip()
-          break
-        case "BlockStatement":
-          scope.push()
-        // default:
-        //   console.log(node);
-      }
-    },
-    leave(node) {
-      if (node.type === "BlockStatement") {
-        scope.pop()
-      }
-    },
+  // Functions can reference variables that are defined after the function. It's better if we read them after that.
+  const hoisted: Node[] = []
+
+  // Into a separate function since we can restart the walk from a sub-node
+  const walkRoot = (root: Node, secondPass = false) => {
+    walk(root, {
+      enter(node) {
+        switch (node.type) {
+          case "ImportDeclaration":
+            readImportDeclaration(node)
+            this.skip()
+            break
+          case "MemberExpression":
+            readMemberExpression(node)
+            this.skip()
+            break
+          case "CallExpression":
+            readCallExpression(node)
+            this.skip()
+            break
+          case "VariableDeclaration":
+            readVariableDeclaration(node)
+            this.skip()
+            break
+          case "AssignmentExpression":
+            readAssignmentExpression(node)
+            this.skip()
+            break
+          case "ExportNamedDeclaration":
+            readExportNamedDeclaration(node)
+            this.skip()
+            break
+          case "ExportDefaultDeclaration":
+            readExportDefaultDeclaration(node)
+            this.skip()
+            break
+          case "FunctionDeclaration":
+          case "ArrowFunctionExpression":
+            if (!secondPass || node !== root) {
+              hoisted.push(node)
+              this.skip()
+            }
+            break
+          case "BlockStatement":
+            scope.push()
+          // default:
+          //   console.log(node);
+        }
+      },
+      leave(node) {
+        if (node.type === "BlockStatement") {
+          scope.pop()
+        }
+      },
+    })
   }
 
-  walk(rootAst, rootWalker)
+  walkRoot(rootAst)
+  while (hoisted.length) {
+    walkRoot(hoisted.pop()!, true)
+  }
 }
 
 class Scope<T> {

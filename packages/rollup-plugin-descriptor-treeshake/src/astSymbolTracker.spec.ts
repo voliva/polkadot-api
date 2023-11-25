@@ -156,6 +156,31 @@ describe("astSymbolTracker", () => {
       },
     )
   })
+
+  it("Tracks when the code is in reverse order", () => {
+    testTrackerFromCode(
+      `
+      import { tracked } from 'moduleA';
+
+      function functionA() {
+        something.subproperty;
+      }
+      const functionB = () => something()
+
+      const something = tracked.something;
+      `,
+      {
+        importSymbol: [
+          [0, { type: "named", name: "tracked" }, "moduleA", "imported"],
+        ],
+        memberAccess: [
+          ["imported", "something", "something"],
+          ["something", "subproperty"],
+        ],
+        functionCall: [["something", []]],
+      },
+    )
+  })
 })
 
 type TransformHooks<T> = {
