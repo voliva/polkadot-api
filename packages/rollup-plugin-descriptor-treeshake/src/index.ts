@@ -2,7 +2,7 @@ import escodegen from "escodegen"
 import type { Node } from "estree"
 import fs from "fs"
 import path from "path"
-import type { ModuleInfo, Plugin, PluginContext } from "rollup"
+import type { ModuleInfo, Plugin } from "rollup"
 import { astSymbolTracker } from "./astSymbolTracker"
 import { applyWhitelist } from "./whitelist"
 
@@ -11,7 +11,7 @@ type DEFAULT = typeof DEFAULT
 
 export default function descriptorTreeShake(codegenFolder: string): Plugin {
   let codegenFiles: string[] = []
-  let papiClient: string = ""
+  let pApiClient: string = ""
 
   const entryPoints: string[] = []
   let detectedPaths: Paths = {}
@@ -19,6 +19,12 @@ export default function descriptorTreeShake(codegenFolder: string): Plugin {
   return {
     name: "descriptorTreeShake",
     async buildStart() {
+      // Reset state
+      entryPoints.length = 0
+      detectedPaths = {}
+
+      // On build start we resolve the ids of the entry files: polkadot-api and
+      // generated code.
       const files = await new Promise<string[]>((resolve, reject) => {
         fs.readdir(codegenFolder, (err, files) => {
           if (err) return reject(err)
@@ -38,17 +44,18 @@ export default function descriptorTreeShake(codegenFolder: string): Plugin {
       if (!papiClientResolution) {
         throw new Error("Can't find module @polkadot-api/client")
       }
-      papiClient = papiClientResolution.id
+      pApiClient = papiClientResolution.id
     },
     moduleParsed(moduleInfo: ModuleInfo) {
+      // If the module is importing one of the entry files, it's marked as an entry point.
       if (
         codegenFiles.some((id) => moduleInfo.importedIds.includes(id)) ||
-        moduleInfo.importedIds.includes(papiClient)
+        moduleInfo.importedIds.includes(pApiClient)
       ) {
         entryPoints.push(moduleInfo.id)
       }
     },
-    buildEnd(this: PluginContext) {
+    buildEnd() {
       type SymbolMetadata =
         | { type: "clientNamespace" | "createClientSymbol" }
         | { type: "generatedSymbol" | "clientSymbol"; file: string }
@@ -67,7 +74,11 @@ export default function descriptorTreeShake(codegenFolder: string): Plugin {
             exports: Exports
           }
 
+      // Map from moduleId to the interesting symbols it's exporting
       const resolvedExports: Record<string, Exports> = {}
+
+      // Traverse one file by moduleId. Returns the paths to be whitelisted
+      // and the list of modules that import it if it's exporting something interesting
       const traverse = (
         id: string,
       ): {
@@ -85,12 +96,14 @@ export default function descriptorTreeShake(codegenFolder: string): Plugin {
           }
         }
 
-        // const visited = new Set<string>();
         const result = readAst(
           root.ast as Node,
+          // We're passing in the list of imports as resolved by Rollup.
+          // TODO better way of doing this? Problem is ast doesn't have names
+          // resolved, so we have to rely on import order.
           root.importedIdResolutions.map(
             (resolution): ImportMetadata | null => {
-              if (resolution.id === papiClient) {
+              if (resolution.id === pApiClient) {
                 return {
                   type: "client",
                 }
@@ -123,6 +136,7 @@ export default function descriptorTreeShake(codegenFolder: string): Plugin {
         }
       }
 
+      // Read the AST of a root file, and return the detected paths and exports.
       const readAst = (
         rootAst: Node,
         importMetadata: Array<ImportMetadata | null>,
@@ -131,6 +145,8 @@ export default function descriptorTreeShake(codegenFolder: string): Plugin {
         const exports: Exports = {}
         astSymbolTracker<SymbolMetadata>(rootAst, {
           importSymbol(index, imported) {
+            // Plugin would allow us to re-resolve the import name, but it's async.
+            // need to benchmark implications of this
             // pluginCtx
             //   .resolve(file, id)
             //   .then((r) => console.log(file, "resolved", r));
@@ -140,11 +156,13 @@ export default function descriptorTreeShake(codegenFolder: string): Plugin {
 
             switch (importMeta.type) {
               case "client":
+                // e.g. import * as pApiClient from '@polkadot-api/client'
                 if (imported.type === "namespace") {
                   return {
                     type: "clientNamespace",
                   }
                 }
+                // e.g. import { createClient } from '@polkadot-api/client'
                 if (
                   imported.type === "named" &&
                   imported.name === "createClient"
@@ -155,6 +173,8 @@ export default function descriptorTreeShake(codegenFolder: string): Plugin {
                 }
                 return null
               case "generated":
+                // We only care about default import here
+                // e.g. import descriptors from "./codegen/test"
                 if (imported.type === "default") {
                   return {
                     type: "generatedSymbol",
@@ -163,6 +183,8 @@ export default function descriptorTreeShake(codegenFolder: string): Plugin {
                 }
                 return null
               case "external":
+                // This import is from a file we have already parsed and know
+                // which "interesting" symbols is exporting.
                 if (imported.type === "default") {
                   return importMeta.exports[DEFAULT] ?? null
                 } else if (imported.type === "named") {
@@ -177,12 +199,17 @@ export default function descriptorTreeShake(codegenFolder: string): Plugin {
           memberAccess(symbol, property) {
             switch (symbol.type) {
               case "clientNamespace":
+                // e.g. pApiClient.createClient
                 return property === "createClient"
                   ? { type: "createClientSymbol" }
                   : null
               case "clientSymbol":
+                // It's using the client, accessing the first prop
+                // e.g. client.tx
                 return { type: "path", file: symbol.file, path: [property] }
               case "path":
+                // Any other subproperty
+                // e.g. `client.tx.Pallet` => path: ['tx'], property: 'Pallet'
                 if (symbol.path.length === 2) {
                   paths[symbol.file] = paths[symbol.file] ?? new Set()
                   paths[symbol.file].add([...symbol.path, property].join("."))
@@ -194,8 +221,10 @@ export default function descriptorTreeShake(codegenFolder: string): Plugin {
           },
           functionCall(symbol, args) {
             if (symbol.type !== "createClientSymbol") return null
+            // e.g. createClient(chain, descriptors)
             const arg = args[1]
             if (!arg || arg.type !== "generatedSymbol") {
+              // TODO graceful exit: warn and bail out from treeshaking
               throw new Error("Can't know which generated code it's using")
             }
             return {
@@ -214,6 +243,8 @@ export default function descriptorTreeShake(codegenFolder: string): Plugin {
 
       const filesToTraverse = new Set(entryPoints)
       const paths: Paths[] = []
+      // filesToTraverse can grow as we're exploring and symbols are getting
+      // exported and imported into other files.
       while (filesToTraverse.size) {
         const id = shiftSet(filesToTraverse)!
         const result = traverse(id)
@@ -223,6 +254,10 @@ export default function descriptorTreeShake(codegenFolder: string): Plugin {
       detectedPaths = mergePaths(paths)
     },
     renderChunk(code, chunk) {
+      // It would be better to do code transformations on `transform` hook, but
+      // at that point we don't have all modules resolved and parsed. After
+      // buildEnd hook, the only place we can do transforms are in `renderChunk`
+      // In here we remove the unused paths.
       Object.entries(detectedPaths).forEach(([id, whitelist]) => {
         const targetModule = chunk.modules[id]
         if (targetModule?.code) {
@@ -238,7 +273,11 @@ export default function descriptorTreeShake(codegenFolder: string): Plugin {
             newCode,
             code.slice(idx + targetModule.renderedLength),
           ].join("")
-          // TODO chunk is mutable and changes applied in this hook will propagate to other plugins and to the generated bundle. That means if you add or remove imports or exports in this hook, you should update imports, importedBindings and/or exports.
+          // TODO chunk is mutable and changes applied in this hook will propagate
+          // to other plugins and to the generated bundle. That means if you add
+          // or remove imports or exports in this hook, you should update imports,
+          // importedBindings and/or exports.
+          // TODO update sourcemaps
         }
       })
 

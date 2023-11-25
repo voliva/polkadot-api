@@ -82,8 +82,9 @@ export function astSymbolTracker<T>(rootAst: Node, hooks: Hooks<T>) {
       case "CallExpression":
         return readCallExpression(expression)
     }
-    // TODO other expressions that could be actually become tracked
-    // e.g. const result = (() => { this.wont.be.currently.tracked })()
+    // For other types we don't support we will return null, but we still need
+    // to go through the ast to find other used tracked symbols
+    // e.g. `const someFunction = () => client.has.to.be.tracked;
     walkRoot(expression)
     return null
   }
@@ -91,7 +92,7 @@ export function astSymbolTracker<T>(rootAst: Node, hooks: Hooks<T>) {
     const property = root.property
     // property can also be an expression, such as in foo[1+2] foo["bar"] foo[something ? "bar" : "baz"]
     // In that case we can't track it
-    // TODO bail out from tree shaking
+    // TODO bail out from tree shaking ?
     // TODO give opportunity to keep tracking with metadata
     if (property.type !== "Identifier") return null
 
@@ -113,12 +114,21 @@ export function astSymbolTracker<T>(rootAst: Node, hooks: Hooks<T>) {
   const readVariableDeclaration = (
     root: VariableDeclaration,
   ): Record<string, T | null> => {
+    // We're returning an object with all the variables we have detected
     return Object.fromEntries(
       root.declarations
         .map((declarator) => {
+          // `init` is the expression on the right-hand-side: We grab that value.
           const value = declarator.init
             ? resolveExpression(declarator.init)
             : null
+
+          // Declarator is left-hand-side. Simplest case is an identifier
+          if (declarator.id.type === "Identifier") {
+            scope.set(declarator.id.name, value)
+            return [declarator.id.name, value]
+          }
+
           // Going for simple case of `const { property } = tracked`
           // TODO nested access `const { property: { subproperty }} = tracked`;
           if (declarator.id.type === "ObjectPattern") {
@@ -153,15 +163,16 @@ export function astSymbolTracker<T>(rootAst: Node, hooks: Hooks<T>) {
             })
           }
           // TODO other pattern assignment
-          if (declarator.id.type !== "Identifier") return null!
-          scope.set(declarator.id.name, value)
-          return [declarator.id.name, value]
+
+          // As we don't have a name on left-hand-side, we have to discard it: return null and filter out.
+          return null!
         })
         .filter(Boolean),
     )
   }
   const readExportNamedDeclaration = (root: ExportNamedDeclaration) => {
     if (root.declaration) {
+      // e.g. `export const result = { /* ... */ }`
       // Declaration can be variable, function or class. We only care about variables
       if (root.declaration.type !== "VariableDeclaration") return
 
@@ -171,6 +182,7 @@ export function astSymbolTracker<T>(rootAst: Node, hooks: Hooks<T>) {
         hooks.exportSymbol?.(symbol, { type: "named", name })
       })
     }
+    // Specifiers is for the case `export { result, client as bestClient }`
     root.specifiers.forEach((specifier) => {
       const symbol = scope.get(specifier.local.name)
       if (symbol) {
@@ -182,11 +194,14 @@ export function astSymbolTracker<T>(rootAst: Node, hooks: Hooks<T>) {
     })
   }
   const readExportDefaultDeclaration = (root: ExportDefaultDeclaration) => {
+    // `export default class Something {}` and `export default function something() {}`
+    // will never be tracked
     if (
       root.declaration.type === "ClassDeclaration" ||
       root.declaration.type === "FunctionDeclaration"
     )
       return
+
     const symbol = resolveExpression(root.declaration)
     if (symbol) {
       hooks.exportSymbol?.(symbol, { type: "default" })
@@ -194,7 +209,8 @@ export function astSymbolTracker<T>(rootAst: Node, hooks: Hooks<T>) {
   }
   const readAssignmentExpression = (root: AssignmentExpression) => {
     const right = resolveExpression(root.right)
-    if (root.left.type !== "Identifier") return null! // TODO pattern assignment
+    // TODO pattern assignment
+    if (root.left.type !== "Identifier") return null!
     scope.set(root.left.name, right)
   }
 

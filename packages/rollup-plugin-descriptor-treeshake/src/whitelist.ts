@@ -14,11 +14,15 @@ export function applyWhitelist(root: Node, whitelist: Set<string>) {
           !constNames.includes(node.id.name) &&
           node.init?.type === "Literal"
         ) {
+          // Removing statements of shape `const TxPalletmethod = "hash"`;
           this.remove()
         }
       }
     },
     leave(node) {
+      // The `this.remove()` removing the constant above left its parent VariableDeclaration
+      // with no declarations, resulting in an invalid AST, e.g. `const ?? ??`.
+      // We also need to remove the VariableDeclaration when this happens.
       if (
         node.type === "VariableDeclaration" &&
         node.declarations.length === 0
@@ -57,6 +61,7 @@ function applyWhitelistToDescriptor(
           break
         case 2:
           if (node.type === "Property" && node.key.type === "Identifier") {
+            // Remove property from objet if it's not in the whitelist.
             const [pallet, prop] = currentPath
             if (!whitelist.has([prop, pallet, node.key.name].join("."))) {
               this.remove()
@@ -81,7 +86,7 @@ function applyWhitelistToDescriptor(
           break
       }
 
-      // Remove empty pallets
+      // Remove empty pallets: `{ Pallet: [{},{},{},{},{}] }`
       if (node.type === "ArrayExpression") {
         if (
           node.elements.every(
@@ -93,7 +98,9 @@ function applyWhitelistToDescriptor(
           this.remove()
         }
       } else if (node.type === "ObjectExpression") {
-        // Remove properties that were removed through this.remove()
+        // The removal of empty pallets can leave objects with properties
+        // without value, leaving an invalid AST: `{ Pallet: ?? }`
+        // We also need to remove the property to leave it valid.
         node.properties = node.properties.filter((prop) => {
           if (prop.type === "Property" && !prop.value) {
             return false
