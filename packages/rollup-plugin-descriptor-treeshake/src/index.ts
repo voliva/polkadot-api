@@ -1,4 +1,5 @@
-import escodegen from "escodegen"
+import recast from "recast"
+import MagicString from "magic-string"
 import type { Node } from "estree"
 import fs from "fs"
 import path from "path"
@@ -258,31 +259,29 @@ export default function descriptorTreeShake(codegenFolder: string): Plugin {
       // at that point we don't have all modules resolved and parsed. After
       // buildEnd hook, the only place we can do transforms are in `renderChunk`
       // In here we remove the unused paths.
-      Object.entries(detectedPaths).forEach(([id, whitelist]) => {
-        const targetModule = chunk.modules[id]
-        if (targetModule?.code) {
-          const ast = this.parse(targetModule.code)
+      const modifications = Object.entries(detectedPaths)
+        .map(([id, whitelist]) => {
+          const targetModule = chunk.modules[id]
+          if (!targetModule?.code) return null!
+
+          const ast = recast.parse(targetModule.code)
           applyWhitelist(ast as Node, whitelist)
+          const result = recast.print(ast)
 
-          const newCode = escodegen.generate(ast)
+          return [targetModule.code, result.code] as const
+        })
+        .filter(Boolean)
 
-          const idx = code.indexOf(targetModule.code)
-          if (idx < 0) throw new Error("Module code can't be found in source")
-          code = [
-            code.slice(0, idx),
-            newCode,
-            code.slice(idx + targetModule.renderedLength),
-          ].join("")
-          // TODO chunk is mutable and changes applied in this hook will propagate
-          // to other plugins and to the generated bundle. That means if you add
-          // or remove imports or exports in this hook, you should update imports,
-          // importedBindings and/or exports.
-          // TODO update sourcemaps
-        }
+      if (!modifications.length) return null
+
+      const codeMs = new MagicString(code)
+      modifications.forEach(([oldCode, newCode]) => {
+        codeMs.replace(oldCode, newCode)
       })
 
       return {
-        code,
+        code: codeMs.toString(),
+        map: codeMs.generateMap({}),
       }
     },
   }

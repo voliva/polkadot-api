@@ -48,7 +48,8 @@
     "vitest": "^0.34.6"
   },
   "dependencies": {
-    "escodegen": "^2.1.0",
-    "estree-walker": "^3.0.3"
+    "estree-walker": "^3.0.3",
+    "magic-string": "^0.30.5",
+    "recast": "^0.23.4"
   }
 }
